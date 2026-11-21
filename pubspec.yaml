@@ -1,0 +1,27 @@
+name: sahibi_vision_ai_studio
+description: Sahibi Vision AI Studio - desktop edition for Windows (script, voice, subtitles from video voice, video editing, 16:9 export).
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  record: ^5.2.0
+  audioplayers: ^6.1.0
+  file_picker: ^8.1.4
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# record 5.x pulls an old Linux add-on that no longer matches the current
+# platform interface; this forces the fixed version (Linux code is unused on Windows).
+dependency_overrides:
+  record_linux: ^1.3.1
+
+flutter:
+  uses-material-design: true
