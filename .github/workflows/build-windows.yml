@@ -1,0 +1,116 @@
+name: Build Windows App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.4'
+          channel: stable
+          cache: true
+
+      - name: Check source files
+        shell: pwsh
+        run: |
+          if (-not (Test-Path lib/main.dart)) { throw 'lib/main.dart is missing' }
+          if (-not (Select-String -Path lib/main.dart -Pattern 'SahibiVisionApp' -Quiet)) { throw 'lib/main.dart is not the Sahibi Vision file' }
+          if (-not (Select-String -Path lib/main.dart -Pattern 'transcribeRange' -Quiet)) { throw 'lib/main.dart is not the desktop version' }
+          if (Select-String -Path pubspec.yaml -Pattern 'ffmpeg_kit' -Quiet) { throw 'pubspec.yaml is the Android version - use the desktop pubspec.yaml' }
+          if (-not (Select-String -Path pubspec.yaml -Pattern 'record_linux' -Quiet)) { throw 'pubspec.yaml is missing the record_linux override' }
+          Copy-Item lib/main.dart "$env:RUNNER_TEMP/main.dart.bak"
+          Copy-Item pubspec.yaml "$env:RUNNER_TEMP/pubspec.yaml.bak"
+
+      - name: Create Windows project files
+        shell: pwsh
+        run: |
+          flutter create --platforms=windows --org com.sahibi.vision --project-name sahibi_vision_ai_studio .
+          Copy-Item "$env:RUNNER_TEMP/main.dart.bak" lib/main.dart -Force
+          Copy-Item "$env:RUNNER_TEMP/pubspec.yaml.bak" pubspec.yaml -Force
+          $f = 'windows/runner/main.cpp'
+          $c = Get-Content $f -Raw
+          $c = $c.Replace('L"sahibi_vision_ai_studio"', 'L"Sahibi Vision AI Studio"')
+          $c = $c.Replace('Size size(1280, 720)', 'Size size(1360, 860)')
+          Set-Content -Path $f -Value $c -NoNewline
+          Select-String -Path $f -Pattern 'Sahibi|1360'
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Add ffmpeg, whisper.cpp and the English speech model
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $rel = 'build/windows/x64/runner/Release'
+          $tools = Join-Path $rel 'tools'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_x -Force
+          Get-ChildItem -Path ffmpeg_x -Recurse -Include ffmpeg.exe, ffprobe.exe | ForEach-Object { Copy-Item $_.FullName $tools }
+          Invoke-WebRequest -Uri 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-bin-x64.zip' -OutFile whisper.zip
+          Expand-Archive -Path whisper.zip -DestinationPath whisper_x -Force
+          $cli = Get-ChildItem -Path whisper_x -Recurse -Filter whisper-cli.exe | Select-Object -First 1
+          if (-not $cli) { throw 'whisper-cli.exe was not found in the whisper.cpp download' }
+          Get-ChildItem -Path $cli.DirectoryName -File | Where-Object { $_.Name -eq 'whisper-cli.exe' -or $_.Extension -eq '.dll' } | ForEach-Object { Copy-Item $_.FullName $tools }
+          Invoke-WebRequest -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin' -OutFile (Join-Path $tools 'ggml-base.en.bin')
+          Get-ChildItem $tools | Select-Object Name, Length
+          & (Join-Path $tools 'ffmpeg.exe') -version | Select-Object -First 1
+          if (-not (Test-Path (Join-Path $tools 'ffprobe.exe'))) { throw 'ffprobe.exe is missing' }
+
+      - name: Make a portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'build/windows/x64/runner/Release/*' -DestinationPath SahibiVision_Portable.zip -Force
+
+      - name: Build the installer (setup .exe)
+        id: installer
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          @'
+          [Setup]
+          AppName=Sahibi Vision AI Studio
+          AppVersion=1.0
+          AppPublisher=Khial Muhammad Sahibi
+          DefaultDirName={autopf}\Sahibi Vision AI Studio
+          DisableProgramGroupPage=yes
+          OutputDir=installer
+          OutputBaseFilename=SahibiVision_Setup
+          Compression=lzma2
+          SolidCompression=yes
+          ArchitecturesInstallIn64BitMode=x64
+          [Files]
+          Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+          [Icons]
+          Name: "{autoprograms}\Sahibi Vision AI Studio"; Filename: "{app}\sahibi_vision_ai_studio.exe"
+          Name: "{autodesktop}\Sahibi Vision AI Studio"; Filename: "{app}\sahibi_vision_ai_studio.exe"
+          [Run]
+          Filename: "{app}\sahibi_vision_ai_studio.exe"; Description: "Start Sahibi Vision AI Studio"; Flags: nowait postinstall skipifsilent
+          '@ | Set-Content -Path installer.iss -Encoding UTF8
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Upload installer
+        if: steps.installer.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SahibiVision-Setup
+          path: installer/SahibiVision_Setup.exe
+          compression-level: 0
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: SahibiVision-Portable
+          path: SahibiVision_Portable.zip
+          compression-level: 0
